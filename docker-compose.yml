@@ -1,0 +1,8 @@
+version: "3"
+services:
+  cloud-fds-admin-api:
+    env_file: .env
+    build: .
+    image: cloud-fds-admin-api:1.0
+    ports:
+      - "5000:5000"
