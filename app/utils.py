@@ -40,6 +40,8 @@ def get_model_value(val):
         return val.value
     if isinstance(val, bytes):
         return str(val, 'utf-8')
+    if isinstance(val, list):
+        return [to_json(item) for item in val]
     return val
 
 

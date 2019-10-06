@@ -40,6 +40,8 @@ def authorized():
             if user_access_token is None:
                 raise Unauthorized(code=401, message='Unauthorized Error')
             user = user_repo.get_by_id(current_user_id)
+            if not user.isActive:
+                raise BadRequest(code=400, message='User is not active')
             if not user.emailVerified:
                 raise Unauthorized(code=401, message='Email is not verified')
             new_args = args + (user, )

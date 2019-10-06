@@ -5,6 +5,7 @@ from flask import current_app, render_template, request
 from flask_jwt_extended import (create_access_token, get_jwt_identity,  # noqa
                                 jwt_required, jwt_optional)
 from flask_restplus import Namespace, Resource
+from flask import redirect
 
 from app.email import send_email
 from app.errors.exceptions import BadRequest, NotFound
@@ -14,6 +15,7 @@ from app.repositories.user import user_repo
 from app.repositories.user_access_token import user_access_token_repo
 from app.repositories.user_api import user_api_repo
 from app.repositories.billing_type import billing_type_repo
+from app.repositories.api_usage_count import api_usage_count_repo
 
 from ..decorators import authorized, consumes, use_args
 from ..utils import to_json
@@ -26,13 +28,16 @@ class APIUserEmailRegistration(Resource):
     def get(self):
         args = request.args.to_dict()
         token = args.get('token')
-        if token is None:
-            raise BadRequest(message='Token is required')
-        user = user_repo.get_user_from_token(token=token)
-        user = user_repo.verify_user(user)
-        data = user._data
-        del data['password']
-        return to_json(data), 201
+        if token is not None:
+            user, message = user_repo.get_user_from_token_registration(token=token)
+            if message:
+                verify = "false"
+            else:
+                user = user_repo.verify_user(user)
+                verify = "true"
+        else:
+            verify = "false"
+        return redirect("{url}?verify={verify}".format(url=current_app.config.get('LOGIN_URL'), verify=verify))
 
 
 @ns.route('/<string:user_id>')
@@ -47,14 +52,16 @@ class APIUser(Resource):
             'company': {'type': 'string'},
             'contactNumber': {'type': 'string'},
             'address': {'type': 'string'},
-            'isActive': {'type': 'boolean'}
+            'isActive': {'type': 'boolean'},
+            'roleType': {'type': 'string', 'enum': ['Admin', 'User']}
         },
     })
     def put(self, current_user, args, user_id):
-        if current_user.roleType == 'User' and (current_user.id != user_id or not current_user.isActive):
+        if current_user.roleType == 'User' and (str(current_user.id != user_id) or not current_user.isActive):
             raise BadRequest(message=f'UserId {user_id} is not valid')
         if current_user.roleType == 'User':
             del args['isActive']
+            del args['roleType']
         user = user_repo.get_by_id(user_id)
         if user is None:
             raise NotFound(message='User is not found')
@@ -64,13 +71,36 @@ class APIUser(Resource):
     @jwt_required
     @authorized()
     def get(self, current_user, user_id):
-        if current_user.roleType == 'User' and (current_user.id != user_id or not current_user.isActive):
+        if current_user.roleType == 'User' and (str(current_user.id) != user_id or not current_user.isActive):
             raise BadRequest(message=f'UserId {user_id} is not valid')
         user = user_repo.get_by_id(user_id)
         if user is None:
             raise NotFound(message='User is not found')
         data = {k: user._data[k] for k in user._data if k != 'password'}
         return {'item': to_json(data)}, 200
+
+
+@ns.route('/<string:user_id>/usage')
+class APIUsageDetail(Resource):
+    @jwt_required
+    @authorized()
+    @use_args(**{
+        'type': 'object',
+        'properties': {
+            'page': {'type': 'string'},
+            'size': {'type': 'string'},
+            'sort': {'type': 'string'},
+            'filter': {'type': 'string'},
+            'optional': {'type': 'string'}
+        }
+    })
+    def get(self, current_user, args, user_id):
+        if current_user.roleType == 'User' and (str(current_user.id) != user_id or not current_user.isActive):
+            raise BadRequest(message=f'UserId {user_id} is not valid')
+        args['user_id'] = user_id
+        items, page_items, count_items = api_usage_count_repo.get_list(args)
+        res = [to_json(item) for item in items]
+        return {'items': res, 'page': page_items, 'count': count_items}, 200
 
 
 @ns.route('/<string:user_id>/transactions')
@@ -89,7 +119,7 @@ class APITransactionList(Resource):
         }
     })
     def get(self, current_user, args, user_id):
-        if current_user.roleType == 'User' and (current_user.id != user_id or not current_user.isActive):
+        if current_user.roleType == 'User' and (str(current_user.id) != user_id or not current_user.isActive):
             raise BadRequest(message=f'UserId {user_id} is not valid')
         args['user_id'] = user_id
         items, page_items, count_items = tran_repo.get_list(args)
@@ -109,21 +139,36 @@ class APIUserAPIListAndCreate(Resource):
             'size': {'type': 'string'},
             'sort': {'type': 'string'},
             'filter': {'type': 'string'},
-            'optional': {'type': 'string'}
+            'optional': {'type': 'string'},
+            'active': {'type': 'string'},
         }
     })
     def get(self, current_user, args, user_id):
-        if current_user.roleType == 'User' and (current_user.id != user_id or not current_user.isActive):
+        if args.get('active') == 'false':
+            active = False
+        elif args.get('active') == 'true':
+            active = True
+        else:
+            active = None
+        if current_user.roleType == 'User' and (str(current_user.id) != user_id or not current_user.isActive):
             raise BadRequest(message=f'UserId {user_id} is not valid')
         args['user_id'] = user_id
-        items, page_items, count_items = user_api_repo.get_list(args)
+        items, page_items, count_items = user_api_repo.get_list(args, active)
         res = [to_json(item) for item in items]
         return {'items': res, 'page': page_items, 'count': count_items}, 200
 
     @jwt_required
     @authorized()
-    def post(self, current_user, user_id):
-        args = {'apiKey': uuid4().hex, 'apiSecret': os.urandom(32).hex(), 'userId': user_id}
+    @use_args(**{
+        'type': 'object',
+        'properties': {
+            'apiName': {'type': 'string'}
+        }
+    })
+    def post(self, current_user, args, user_id):
+        args['apiKey'] = uuid4().hex
+        args['apiSecret'] = os.urandom(32).hex()
+        args['userId'] = user_id
         user = user_api_repo.create(args, current_user)
         return {'item': to_json(user._data), 'message': 'create UserAPI successfully'}, 200
 
@@ -136,6 +181,7 @@ class APIUserAPIUpdate(Resource):
         'type': 'object',
         'properties': {
             'isActive': {'type': 'boolean'},
+            'apiName': {'type': 'string'}
         }
     })
     def put(self, current_user, args, user_id, api_id):
@@ -144,12 +190,14 @@ class APIUserAPIUpdate(Resource):
         user_api = user_api_repo.get_by_id(api_id)
         if user_api is None:
             raise NotFound(message='UserAPI is not found')
+        if str(user_api.userId) != user_id:
+            raise BadRequest(message='api_id is not valid')
         user_api = user_api_repo.update(user_api, current_user, args)
         return {'item': to_json(user_api._data)}, 204
 
 
 @ns.route('')
-class APIUserRegister(Resource):
+class APIUserRegisterAndList(Resource):
     @jwt_optional
     @authorized()
     @use_args(**{
@@ -192,14 +240,34 @@ class APIUserRegister(Resource):
         if user is None:
             raise BadRequest(code=400, message=message)
         token = user_repo.generate_registration_token(user)
+        url = "{path}/v1/admin/users/verify?token={token}".format(path=current_app.config.get('API_URL'), token=token)
         send_email(
             subject='[TheVault] Email Registration',
             sender=current_app.config['MAIL_USERNAME'],
             recipients=[user.email],
-            html_body=render_template('email/email_verification.html', user=user, token=token))
+            html_body=render_template('email/email_verification.html', user=user, url=url))
         data = user._data
         del data['password']
         return {'item': to_json(data), 'message': 'Signup user is successful'}, 201
+
+    @jwt_required
+    @authorized()
+    @use_args(**{
+        'type': 'object',
+        'properties': {
+            'page': {'type': 'string'},
+            'size': {'type': 'string'},
+            'sort': {'type': 'string'},
+            'filter': {'type': 'string'},
+            'optional': {'type': 'string'},
+        }
+    })
+    def get(self, current_user, args):
+        if current_user.roleType == 'User':
+            raise BadRequest(message='Role admin is required')
+        items, page_items, count_items = user_repo.get_list(args)
+        res = [to_json(item) for item in items]
+        return {'items': res, 'page': page_items, 'count': count_items}, 200
 
 
 @ns.route('/login')
@@ -239,7 +307,7 @@ class APIUserLogout(Resource):
     @jwt_required
     @authorized()
     def post(self, current_user, user_id):
-        if current_user.roleType == 'User' and (current_user.id != user_id or not current_user.isActive):
+        if current_user.roleType == 'User' and (str(current_user.id) != user_id or not current_user.isActive):
             raise BadRequest(message=f'UserId {user_id} is not valid')
         user_access_token_repo.remove_by_user_id(user_id=user_id)
         return {'message': f"Logout {user_id} successfully"}, 204

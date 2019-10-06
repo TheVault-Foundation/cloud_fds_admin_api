@@ -5,6 +5,7 @@ from app.extensions import db
 
 class UserApi(db.Document):
     userId = db.ObjectIdField(required=True)
+    apiName = db.StringField(max_length=100)
     apiKey = db.StringField(required=True, unique=True, max_length=100)
     apiSecret = db.StringField(required=True, max_length=300)
     isActive = db.BooleanField(required=True, default=True)
